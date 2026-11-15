@@ -1,0 +1,13 @@
+model,layout,T,B,cp,scheme,step_ms,t_fixed_ms,kernel,tag
+mtgr-large,mtgr,2048,32,1,block,,,default,calibration
+mtgr-large,mtgr,2048,32,2,block,,,default,calibration
+mtgr-large,mtgr,2048,32,4,block,,,default,calibration
+mtgr-large,mtgr,2048,32,8,block,,,default,calibration
+mtgr-large,mtgr,4096,32,1,block,,,default,calibration
+mtgr-large,mtgr,4096,32,2,block,,,default,calibration
+mtgr-large,mtgr,4096,32,4,block,,,default,calibration
+mtgr-large,mtgr,4096,32,8,block,,,default,calibration
+mtgr-large,mtgr,4096,32,4,block,,,triton,calibration
+mtgr-large,mtgr,4096,16,4,block,,,default,calibration
+mtgr-large,mtgr,4096,64,4,block,,,default,calibration
+mtgr-large,mtgr,2048,32,2,balanced,,,default,calibration

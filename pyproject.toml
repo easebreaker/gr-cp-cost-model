@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "grcost"
+version = "0.1.0"
+description = "Analytic step-time and memory prediction for context-parallel generative recommenders"
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "MIT" }
+authors = [{ name = "grcost contributors" }]
+keywords = ["recommender systems", "generative recommendation", "context parallelism",
+            "performance modeling", "HSTU", "MTGR", "LONGER"]
+dependencies = []
+
+[project.optional-dependencies]
+figures = ["pillow>=9"]
+dev = ["pytest"]
+
+[project.scripts]
+grcost = "grcost.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
