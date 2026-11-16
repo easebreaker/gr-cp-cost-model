@@ -24,6 +24,7 @@ class Hardware:
     link_latency: float      # s per collective/message (alpha term)
     mem_gb: float
     scale_out_bw: float = 12.5e9   # bytes/s, 100 Gb/s InfiniBand
+    pipeline_overlap: bool = True  # can a collective run under compute?
     notes: str = ""
 
     def break_even_chunk(self, bandwidth: float | None = None) -> float:
@@ -66,6 +67,10 @@ A100_80 = Hardware(
 # Values are for the common 910B class parts; verify against your SKU before
 # trusting absolute numbers -- the *ratios* (which is what c* depends on) are
 # usually close, but the advertised TFLOPS vary a lot by variant and dtype.
+# Ascend 910B / 910C: HCCL does not pipeline collectives against compute on this
+# generation, so the latency term is fully exposed. ``pipeline_overlap=False``
+# carries that fact instead of leaving it to a fitted ``overlap`` -- it is a
+# property of the stack, not of the workload.
 ASCEND_910B = Hardware(
     name="Ascend-910B",
     peak_flops=320e12,
@@ -74,10 +79,25 @@ ASCEND_910B = Hardware(
     link_latency=8e-6,
     mem_gb=64.0,
     scale_out_bw=25e9,
-    notes="HCCS ~392GB/s; 64GB HBM. VERIFY: SKU/dtype dependent.",
+    pipeline_overlap=False,
+    notes="HCCS ~392GB/s; 64GB HBM; HCCL not pipelined. VERIFY: SKU/dtype.",
 )
 
-PRESETS = {h.name.lower(): h for h in (H100_SXM, A100_80, ASCEND_910B)}
+ASCEND_910C = Hardware(
+    name="Ascend-910C",
+    peak_flops=800e12,
+    hbm_bw=3.2e12,
+    link_bw=392e9,
+    link_latency=8e-6,
+    mem_gb=128.0,
+    scale_out_bw=25e9,
+    pipeline_overlap=False,
+    notes="VERIFY all four numbers against the SKU. HCCL not pipelined, so a "
+          "collective is fully exposed.",
+)
+
+PRESETS = {h.name.lower(): h for h in (H100_SXM, A100_80, ASCEND_910B,
+                                       ASCEND_910C)}
 
 
 def get(name: str) -> Hardware:

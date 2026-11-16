@@ -23,6 +23,7 @@ import math
 from dataclasses import asdict, dataclass, fields, replace
 from typing import Dict, List, Optional
 
+from .comm import CommModel
 from .spec import Layout
 from .work import rank_work
 
@@ -36,9 +37,16 @@ class Params:
     gamma: float = 1.0         # sharpness of the efficiency roll-off
     alpha: float = 12e-6       # *exposed* per-collective latency, seconds
     bw_comm: float = 300e9     # *exposed* effective collective bandwidth, bytes/s
-    overlap: float = 0.0       # fraction of comm hidden; PIN THIS, do not fit it
+    overlap: float = 0.0       # fraction of latency hidden. PIN 0 on 910C: HCCL
+                               # is not pipelined against compute there.
     bw_util: float = 0.6       # HBM efficiency for elementwise traffic; PIN THIS
     recompute: float = 4.0 / 3.0  # activation-recompute multiplier on fwd work
+    v_switch: float = 0.0      # message size where the collective algorithm
+                               # switches to ring; 0 = same policy at all sizes
+    step_policy: str = "auto"  # "auto"/"rd": ceil(log2 n); "ring": n-1
+    t_emb_ms: float = 0.0      # measured single-device lookup time at cp=1
+    emb_shard_by_cp: bool = True   # does the lookup run on the CP shard?
+    emb_unexplained: float = 1.0   # d_stage - sum(known stages), for reconciliation
 
     # Which parameters are fitted by default.
     #
@@ -51,6 +59,23 @@ class Params:
     # two exposed terms become identifiable.  Same reasoning for ``bw_util``
     # and ``recompute``, which can be measured directly.
     FREE: tuple = ("eff_inf", "c_star", "gamma", "alpha", "bw_comm")
+
+    def comm_model(self) -> CommModel:
+        """The latency/bandwidth pair plus its step count.
+
+        ``alpha`` and ``bw_comm`` stay the fitted numbers; the step count is
+        derived from ``step_policy`` and the rank count, so no per-size bucket is
+        ever fitted.
+        """
+        return CommModel(alpha=self.alpha, bw=self.bw_comm,
+                         policy=self.step_policy, v_switch=self.v_switch,
+                         overlap=self.overlap)
+
+    def t_emb_for(self, cp: int) -> float:
+        """Per-device lookup time in ms (requirement 7: sharded by CP)."""
+        if self.t_emb_ms <= 0:
+            return 0.0
+        return self.t_emb_ms / max(cp, 1) if self.emb_shard_by_cp else self.t_emb_ms
 
     def copy(self, **kw) -> "Params":
         return replace(self, **kw)
@@ -127,16 +152,17 @@ def predict(
     chunk = T / cp
     eff = efficiency(p, chunk) if (abl is None or abl.efficiency) else 1.0
 
+    cm = p.comm_model()
     t_rank = []
     for w in works:
         t_comp = w.flops / (hw.peak_flops * eff)
         t_mem = w.bytes_ew / (hw.hbm_bw * p.bw_util) if (abl is None or abl.elementwise) else 0.0
-        t_comm = (w.rounds * p.alpha + w.bytes_kv / p.bw_comm) \
+        t_comm = cm.time(cp, w.bytes_kv, rounds=w.rounds) \
             if (abl is None or abl.comm) else 0.0
-        t_rank.append(p.recompute * (t_comp + t_mem) + (1.0 - p.overlap) * t_comm)
+        t_rank.append(p.recompute * (t_comp + t_mem) + t_comm)
 
     crit = max(t_rank) if (abl is None or abl.critical == "max") else (sum(t_rank) / cp)
-    total = t_fixed_ms / 1e3 + crit
+    total = t_fixed_ms / 1e3 + p.t_emb_for(cp) / 1e3 + crit
 
     if not detail:
         return total * 1e3
@@ -145,11 +171,16 @@ def predict(
     w = works[crit_rank]
     bd = {
         "step_ms": total * 1e3,
-        "fixed_ms": t_fixed_ms,
+        "fixed_ms": t_fixed_ms + p.t_emb_for(cp),
         "compute_ms": p.recompute * w.flops / (hw.peak_flops * eff) * 1e3,
         "elementwise_ms": p.recompute * w.bytes_ew / (hw.hbm_bw * p.bw_util) * 1e3,
-        "comm_ms": (1.0 - p.overlap) * (w.rounds * p.alpha
-                                       + w.bytes_kv / p.bw_comm) * 1e3,
+        "comm_ms": cm.time(cp, w.bytes_kv, rounds=w.rounds) * 1e3,
+        "comm_latency_ms": cm.time_split(cp, w.bytes_kv, rounds=w.rounds)[0] * 1e3,
+        "comm_bytes_ms": cm.time_split(cp, w.bytes_kv, rounds=w.rounds)[1] * 1e3,
+        "comm_rounds": w.rounds,
+        "comm_steps": cm.steps_for(cp, w.bytes_kv / max(w.rounds, 1)),
+        "comm_v_star_mb": cm.break_even_bytes(cp) / 1e6,
+        "t_emb_ms": p.t_emb_for(cp),
         "eff": eff,
         "chunk": chunk,
         "crit_rank": crit_rank,
@@ -200,8 +231,10 @@ def attribute(
             + w.bytes_ew / (hw.hbm_bw * p.bw_util)
         )
 
+    cm = p.comm_model()
+
     def exposed_comm(w):
-        return (1.0 - p.overlap) * (w.rounds * p.alpha + w.bytes_kv / p.bw_comm)
+        return cm.time(cp, w.bytes_kv, rounds=w.rounds)
 
     shard_1 = sum(comp(w, eff1) for w in works1)
     mean_n = sum(comp(w, effc) for w in works_n) / cp
@@ -209,16 +242,18 @@ def attribute(
     max_n = comp(worst, effc)
     comm = exposed_comm(worst)
 
-    s0 = t_fixed_ms / 1e3 + shard_1 / cp
-    s1 = t_fixed_ms / 1e3 + mean_n
-    s2 = t_fixed_ms / 1e3 + max_n
-    s3 = t_fixed_ms / 1e3 + max_n + comm
+    emb = p.t_emb_for(cp) / 1e3
+    s0 = t_fixed_ms / 1e3 + emb + shard_1 / cp
+    s1 = t_fixed_ms / 1e3 + emb + mean_n
+    s2 = t_fixed_ms / 1e3 + emb + max_n
+    s3 = t_fixed_ms / 1e3 + emb + max_n + comm
 
     total = s3
     return {
         "cp": cp,
         "step_ms": total * 1e3,
-        "fixed_ms": (t_fixed_ms / 1e3) * 1e3,
+        "fixed_ms": (t_fixed_ms / 1e3 + emb) * 1e3,
+        "emb_ms": emb * 1e3,
         "ideal_shard_ms": (shard_1 / cp) * 1e3,
         "eff_loss_ms": (s1 - s0) * 1e3,
         "imbalance_loss_ms": (s2 - s1) * 1e3,

@@ -88,30 +88,40 @@ def collective_points(micro_csv: str) -> List[Tuple[str, int, float]]:
     return out
 
 
-def fit_comm(points: List[Tuple[str, int, float]]) -> Tuple[float, float, str]:
-    """Least-squares fit of ``t = alpha + bytes / bw`` per collective kind.
+def fit_comm(points: List[Tuple[str, int, float]],
+             cp: int = 8) -> Tuple[float, float, str]:
+    """Fit ``t = S*cp * alpha + bytes / bw`` over the whole size sweep.
 
-    Two unknowns, so this is a closed-form 2x2 solve. Reports the kind that was
-    measured, because ``alpha`` and ``bw`` differ between all-gather, all-to-all
-    and ring -- and the ring is what CP actually uses.
+    Two unknowns, one closed-form 2x2 solve, and the step count ``S`` comes from
+    the collective algorithm rather than from a per-segment parameter.  The kind
+    is reported because ``alpha`` and ``bw`` differ between all-gather,
+    all-to-all and ring -- and CP uses one of the first two, rarely ring.
     """
-    if len(points) < 2:
-        return 0.0, 0.0, "no collective data"
-    xs = [b for _, b, _ in points]
-    ys = [t / 1e3 for _, _, t in points]      # seconds
+    from grcost.comm import diagnose_size_dependence, steps
+
+    if len(points) < 3:
+        return 0.0, 0.0, "need >= 3 sizes (see comm_analysis.py)"
+    by_kind = {}
+    for k, b, t in points:
+        by_kind.setdefault(k, []).append((b, t / 1e3))
+    kind, pts = max(by_kind.items(), key=lambda kv: len(kv[1]))
+
+    st = steps(cp, "auto")
+    xs = [b for b, _ in pts]
+    ys = [t for _, t in pts]
     n = len(xs)
-    sx = sum(xs)
-    sy = sum(ys)
+    sx, sy = sum(xs), sum(ys)
     sxx = sum(x * x for x in xs)
     sxy = sum(x * y for x, y in zip(xs, ys))
     det = sxx * n - sx * sx
     if abs(det) < 1e-9:
         return 0.0, 0.0, "degenerate byte range"
     slope = (sxy * n - sx * sy) / det        # seconds per byte
-    alpha = (sy - slope * sx) / n
+    intercept = (sy - slope * sx) / n        # = S * alpha
+    alpha = intercept / st if st else 0.0
     bw = 1.0 / slope if slope > 0 else 0.0
-    kinds = sorted({k for k, _, _ in points})
-    return alpha, bw, f"kinds={'+'.join(kinds)}"
+    note = f"kind={kind} steps={st} n_sizes={len(pts)}"
+    return alpha, bw, note
 
 
 # --------------------------------------------------------------------------
@@ -160,7 +170,8 @@ def cmd_compose(args) -> int:
         print("         routes: layer-count slope and empty-kernel slope).")
 
     base = Params(bw_util=args.bw_util, recompute=args.recompute,
-                  overlap=args.overlap)
+                  overlap=0.0 if hw.pipeline_overlap is False else args.overlap,
+                  t_emb_ms=args.t_emb)
     pts = extract_eff(model, lambda T: resolve_layout(layout_name, T), meas, hw,
                       B=args.B, t_fixed_ms=args.t_fixed,
                       bw_util=args.bw_util, recompute=args.recompute,
@@ -168,7 +179,7 @@ def cmd_compose(args) -> int:
     params, rmse = fit_curve(pts, p0=base)
     print(report(pts, params, rmse))
 
-    alpha, bw, note = fit_comm(collective_points(args.micro))
+    alpha, bw, note = fit_comm(collective_points(args.micro), cp=args.cp)
     if bw:
         params = params.copy(alpha=alpha, bw_comm=bw)
         print(f"\n  collective fit: alpha={alpha * 1e6:.1f}us  bw={bw / 1e9:.1f} GB/s "
@@ -176,6 +187,10 @@ def cmd_compose(args) -> int:
     else:
         print(f"\n  collective: {note} -- falling back to nominal link bandwidth")
         params = params.copy(alpha=params.alpha, bw_comm=hw.link_bw)
+    if hw.pipeline_overlap is False:
+        params = params.copy(overlap=0.0)
+        print("  overlap pinned to 0: this stack does not pipeline collectives "
+              "(HCCL)")
 
     cps = [1] + [int(x) for x in args.cps.split(",")]
     print("\n  composed CP prediction (no CP run used as input):")
@@ -324,6 +339,10 @@ def main(argv=None) -> int:
                          "Defaults to the `layers` column of --sweep.")
     ap.add_argument("--check-csv", dest="check_csv", default=None,
                     help="measured end-to-end rows to score the composition against")
+    ap.add_argument("--cp", type=int, default=8,
+                    help="rank count the collective fit should assume")
+    ap.add_argument("--t-emb", dest="t_emb", type=float, default=0.0,
+                    help="measured single-device embedding lookup time, ms")
     ap.add_argument("--repeats", type=int, default=15)
     args = ap.parse_args(argv)
     return cmd_compose(args) if args.mode == "compose" else cmd_measure(args)

@@ -121,15 +121,21 @@ def build_plan(model: str = "mtgr-large", T_ref: int = 4096,
     ]
 
     # collective cost curve: alpha + V/BW, per collective kind
-    for kind in ("all_gather", "all_to_all", "all_reduce"):
+    # The size sweep has to straddle V* = S*alpha*BW, otherwise alpha and bw are
+    # not separately identifiable and the fit trades them against each other.
+    # V* runs from ~2 MB (2 ranks, log N steps) to ~30 MB (16 ranks, ring), so
+    # the grid spans 64 KB .. 256 MB and is repeated at two rank counts.
+    for kind in ("all_gather", "all_to_all"):
         jobs.append(
             Job(f"M5.{kind}", "L0", "collective", {
-                "op": kind, "npus": cp_grid,
-                "bytes": [1 << 16, 1 << 18, 1 << 20, 1 << 22, 1 << 24, 1 << 26],
+                "op": kind, "npus": sorted({2, max(cp_grid)}),
+                "bytes": [1 << 16, 1 << 18, 1 << 20, 1 << 22, 1 << 24,
+                          1 << 26, 1 << 28],
             },
-                "time vs bytes for each NPU count",
-                "alpha and bw_comm (exposed); also whether overlap is plausible",
-                repeats=10, est_minutes=2.0)
+                "time vs message size, at two rank counts",
+                "one alpha and one bw per collective; the shift of the knee "
+                "with N tests the step-count model instead of assuming it",
+                repeats=10, est_minutes=4.0)
         )
 
     jobs.append(

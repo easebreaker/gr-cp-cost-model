@@ -137,6 +137,11 @@ T_max(CP)  ≈ CP · (M_device − M_static − Δ(CP)) / (a B)
 
 ## 5. Communication
 
+> Full derivation, including why apparent bandwidth depends on message size:
+> `11-comm-model.md`. The short version is that a collective is `S(N)` *serial*
+> steps, so `BW_app = BW_inf/(1 + V*/V)` with `V* = S·alpha·BW_inf` -- one curve,
+> two parameters, and a knee that moves with the rank count.
+
 Per layer, each rank must ship its K/V shard to the other `CP-1` ranks:
 
 ```

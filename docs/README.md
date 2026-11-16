@@ -15,6 +15,8 @@ version.
 | `08-npu-experiment-design.md` | the NPU measurement plan: what, how, in what order, and the gates |
 | `09-bridge-to-timepred.md` | deriving the existing framework's `κ` instead of fitting it |
 | `10-scaling-law.md` | **reserved extension**: composing with a quality law; three tiers; go/no-go |
+| `11-comm-model.md` | why apparent collective bandwidth depends on message size, and the step-count model that replaces piecewise fits |
+| `12-measurement-sheet.md` | the blank data-collection form, by stage and metric (generated) |
 
 ## related-work/
 

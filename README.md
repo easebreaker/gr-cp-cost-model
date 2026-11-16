@@ -24,8 +24,22 @@ t_step(CP) = t_fixed
 with
 
 ```
-eff(c) = eff_inf / (1 + (c_star / c) ** gamma)
+eff(c)   = eff_inf / (1 + (c_star / c) ** gamma)      kernel efficiency vs chunk
+t_comm   = rounds * S(N) * alpha + V / bw_comm         collective: serial steps
+BW_app   = bw_comm / (1 + v_star / V)                  what a measurement reports
+v_star   = S(N) * alpha * bw_comm                      break-even message size
 ```
+
+Two things that look like fitted constants and are not:
+
+* **Apparent bandwidth depends on message size** because a collective is `S(N)`
+  serial steps, so the latency is amortised over a growing payload. One `alpha`
+  and one `bw_comm` explain the whole curve; a per-size fit puts its breakpoints
+  at `v_star`, which moves with the rank count and therefore does not transfer.
+  See `docs/11-comm-model.md`.
+* **`rounds` and `S(N)` are different counts.** `rounds` = how many collectives
+  per step (layers x buckets); `S(N)` = how many hops inside one. Multiplying
+  them together inflates the latency term by `cp-1`.
 
 Five fitted parameters. Three more are pinned from microbenchmarks because they
 are *not identifiable* from step time alone (see `docs/03-calibration.md`).
@@ -89,6 +103,25 @@ python scripts/npu/micro.py --dry-run
 python scripts/npu/sweep.py --dry-run
 ```
 
+The blank data-collection form (regenerate after changing any parameter):
+
+```bash
+PYTHONPATH=src python scripts/make_sheet.py
+# -> data/measurement_fill.md      <- type into this one
+# -> data/measurement_fill.csv     (same content, for a spreadsheet)
+# -> data/measurement_sheet.csv    (machine sheet: provenance + prerequisites)
+# -> docs/12-measurement-sheet.md  (printable)
+```
+
+Fill `data/measurement_fill.md`, then read it back. The reader converts
+human units (us, GB/s) to SI, refuses to compute anything whose prerequisites
+are blank, runs the gates it can decide, and writes `out/params.json`:
+
+```bash
+PYTHONPATH=src python scripts/read_fill.py data/measurement_fill.md
+PYTHONPATH=src python scripts/read_fill.py data/measurement_fill.md --all   # every blank
+```
+
 The tier-3 composition (placeholders, prints a warning):
 
 ```bash
@@ -105,7 +138,7 @@ PYTHONPATH=src python scripts/check_cp_table.py        # reads the RecSys'25 CP 
 Tests:
 
 ```bash
-PYTHONPATH=src python -m unittest discover -s tests -v     # 120 tests
+PYTHONPATH=src python -m unittest discover -s tests -v     # 208 tests
 ```
 
 > If you are on macOS with the system Python and see the interpreter die with
@@ -149,7 +182,7 @@ src/grcost/
 docs/            the argument: model, protocol, literature, framing, NPU plan
 scripts/         the three runs above
 scripts/npu/     Ascend measurement drivers (harness, micro, sweep, e2e)
-data/            fillable calibration table + generated NPU manifest
+data/            fillable calibration table, NPU manifest, measurement sheet
 ```
 
 ## Status

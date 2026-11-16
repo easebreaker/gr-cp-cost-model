@@ -1,0 +1,92 @@
+﻿阶段,作业,指标,变体,固定配置,怎么测,值,CV%,备注
+P0 预检,env,机型与卡数,,,npu-smi info,,,
+P0 预检,env,单卡显存,,,npu-smi info,,,
+P0 预检,env,CANN 版本,,,cat $ASCEND_HOME_PATH/version.cfg,,,
+P0 预检,env,torch / torch_npu 版本,,,"python -c 'import torch, torch_npu'",,,
+P0 预检,topo,每对卡的链路类型,,,npu-smi info -t topo,,,混有 SYS/PHB 时 2 卡带宽会异常低，直接改变 c*
+P0 预检,spec,标称算力,,,厂商规格，注明 dtype,,,
+P0 预检,spec,标称 HBM 带宽,,,厂商规格,,,
+P0 预检,spec,标称链路带宽,,,HCCS 聚合,,,仅用于给 c* 一个上界，不能用于拟合
+L0 常数,M1.1,同点 CV（短序列）,,,同一配置连测 10 次 ×3 组,,,这是后面所有判据的分辨率
+L0 常数,M1.2,同点 CV（长序列）,,,同上，最长序列,,,
+L0 常数,M2.1,下发成本,,,空 kernel 循环 1/8/64/256 次，取斜率,,,
+L0 常数,M2.2,单次启动成本（独立口径）,,,同一 kernel 打 1/2/4/8 次,,,
+L0 常数,M2.3,不可切部分,,,dense 主干换 no-op，只留 embedding+all2all+optimizer,,,第二条独立口径；两条路同量级才可信
+L0 常数,M3.1,实测 HBM 带宽,,,64/256 MB 纯 copy,,,
+L0 常数,M3.1,HBM 效率,,,BW_hbm / BW_nom,,,pin 住，不要拟合
+L0 常数,M3.2,实测峰值算力,,,大 matmul，工作 dtype,,,eff_inf 的物理上限
+P0 预检,env,是否开启 activation checkpoint,,,读训练脚本的配置,,,pin 住；直接由配置决定，不要拟合
+L0 常数,M4.1,同步开销,,,synchronize() ×1 / ×100,,,
+L0 常数,M5,每次集合通信延迟,collective=all_gather,,时间-字节曲线截距，按原语分开,,,必须用 CP 实际会用的原语
+L0 常数,M5,每次集合通信延迟,collective=all_to_all,,时间-字节曲线截距，按原语分开,,,必须用 CP 实际会用的原语
+L0 常数,M5,每次集合通信延迟,collective=all_reduce,,时间-字节曲线截距，按原语分开,,,必须用 CP 实际会用的原语
+L0 常数,M5,集合通信有效带宽,collective=all_gather,,时间-字节曲线斜率倒数，按原语与 cp 度分开,,,2 卡与 8 卡可差 4 倍
+L0 常数,M5,集合通信有效带宽,collective=all_to_all,,时间-字节曲线斜率倒数，按原语与 cp 度分开,,,2 卡与 8 卡可差 4 倍
+L0 常数,M5,集合通信有效带宽,collective=all_reduce,,时间-字节曲线斜率倒数，按原语与 cp 度分开,,,2 卡与 8 卡可差 4 倍
+L0 常数,M5,重叠比例,,,通信-only 微基准：实测时间 / (bytes/BW),,,"pin！放开拟合会退化成 eta->1, bw->0"
+L0 常数,M6.1,最大可跑序列长度,"cp=1,2,4,8",,二分 OOM 边界,,,各档 chunk 长度必须不同，否则 a 不可辨识
+L0 常数,M6.1,每 token 激活字节,,,由两档不同 chunk 的 T_max 反解,,,chunk 相同时 fit_memory 返回 identifiable=False
+L0 常数,M6.1,静态显存占用,,,同上,,,
+L1 曲线,decl,计时模块的层数,,,sweep.py --layers 的值,,,必须与预测目标一致，否则 eff 错 n_layers 倍
+L1 曲线,S1.1,单层/整栈扫描：序列长度,T=512,,sweep.py --lengths,,,
+L1 曲线,S1.1,单层/整栈扫描：序列长度,T=1024,,sweep.py --lengths,,,
+L1 曲线,S1.1,单层/整栈扫描：序列长度,T=2048,,sweep.py --lengths,,,
+L1 曲线,S1.1,单层/整栈扫描：序列长度,T=4096,,sweep.py --lengths,,,
+L1 曲线,S1.1,单层/整栈扫描：序列长度,T=8192,,sweep.py --lengths,,,
+L1 曲线,S1.1,单层/整栈扫描：序列长度,T=16384,,sweep.py --lengths,,,
+L1 曲线,S1.1,对应中位数时间,,,固定协议：warmup5 / 中位数15 / 前后 synchronize / 不 flush,,,
+L1 曲线,S1.1,对应 CV,,,同上,,,
+L1 曲线,S1.1,提取出的效率,,,eff = flops / (P·((t−t_fixed)/recomp − bytes/(BW·bw_util))),,,代数解出，不是联合拟合
+L1 曲线,S1.2,整栈扫描时间（交叉验算）,,,sweep.py --layers {model_layers},,,与 S1.1 × 层数 应当吻合
+L1 曲线,S2.1,每 rank 计算不均衡,scheme=block,,只跑某 rank 的 query 行，key 保留全长,,,"每个 scheme 再按 cp=2,4,8 各一行"
+L1 曲线,S2.1,每 rank 计算不均衡,scheme=balanced,,只跑某 rank 的 query 行，key 保留全长,,,"每个 scheme 再按 cp=2,4,8 各一行"
+L1 曲线,S2.1,每 rank 计算不均衡,scheme=striped,,只跑某 rank 的 query 行，key 保留全长,,,"每个 scheme 再按 cp=2,4,8 各一行"
+L1 曲线,S2.1,闭式预测的不均衡,,,2 − 1/cp（纯因果、连续分块）,,,实测不得超过此上界，超过说明掩码假设错
+L1 曲线,S3.1,static 占比对时间的影响,share=0,,扫 static_share,,,预测：时间随 share 上升
+L1 曲线,S3.1,static 占比对时间的影响,share=0.5,,扫 static_share,,,预测：时间随 share 上升
+L1 曲线,S3.1,static 占比对时间的影响,share=0.85,,扫 static_share,,,预测：时间随 share 上升
+L1 曲线,S3.1,static 占比对时间的影响,share=0.95,,扫 static_share,,,预测：时间随 share 上升
+L1 曲线,S3.1,static 占比对不均衡的影响,,,同上的 max/mean,,,预测：不均衡随 share 下降。两条必须同时成立
+L1 曲线,S4.1,padding 浪费比例,,,T=max 与 T=mean 两次计时对比,,,只报不除；归入 t_fixed
+C0 组合,C1,效率渐近值,,,fit_curve 三参数之一,,,超过 F_real/F_nom 说明在补偿别的东西
+C0 组合,C1,半效率 chunk 长度,,,fit_curve,,,这是 G1 的判据
+C0 组合,C1,滚降陡度,,,fit_curve,,,
+C0 组合,C1,拟合残差,,,fit_curve 的 rmse,,,
+C0 组合,C2,breakeven chunk,,,F_real / bw_comm（不是标称）,,,跨节点时另算：F/BW_link_out
+C0 组合,C2,roofline 拐点,,,F_real / BW_hbm,,,与 c_comm 是两个不同门槛
+L2 验证,E1.1,端到端 step 时间,cp=1,T=4096 与 T=2048，B=32,标定表：未见过的长度与 CP 度,,,
+L2 验证,E1.1,端到端 step 时间,cp=2,T=4096 与 T=2048，B=32,标定表：未见过的长度与 CP 度,,,
+L2 验证,E1.1,端到端 step 时间,cp=4,T=4096 与 T=2048，B=32,标定表：未见过的长度与 CP 度,,,
+L2 验证,E1.1,端到端 step 时间,cp=8,T=4096 与 T=2048，B=32,标定表：未见过的长度与 CP 度,,,
+L2 验证,E1.1,对应 CV,,T=4096 与 T=2048，B=32,同一配置的重复测量,,,
+L2 验证,E1.1,模型预测值,,T=4096 与 T=2048，B=32,grcost predict，用 C0 的参数,,,
+L2 验证,E1.1,误差,,T=4096 与 T=2048，B=32,(pred−meas)/meas,,,
+L2 验证,E1.2,端到端 step 时间,B=16,cp=4，T=4096,batch 是否改善 CP 效率（判 alpha 是否真实）,,,
+L2 验证,E1.2,端到端 step 时间,B=64,cp=4，T=4096,batch 是否改善 CP 效率（判 alpha 是否真实）,,,
+L2 验证,E1.2,对应 CV,,cp=4，T=4096,同一配置的重复测量,,,
+L2 验证,E1.2,模型预测值,,cp=4，T=4096,grcost predict，用 C0 的参数,,,
+L2 验证,E1.2,误差,,cp=4，T=4096,(pred−meas)/meas,,,
+L2 验证,E2.1,端到端 step 时间,scheme=block,"T=4096, cp=4, B=32",balancer 实测收益 vs 2−1/cp 上界,,,
+L2 验证,E2.1,端到端 step 时间,scheme=balanced,"T=4096, cp=4, B=32",balancer 实测收益 vs 2−1/cp 上界,,,
+L2 验证,E2.1,对应 CV,,"T=4096, cp=4, B=32",同一配置的重复测量,,,
+L2 验证,E2.1,模型预测值,,"T=4096, cp=4, B=32",grcost predict，用 C0 的参数,,,
+L2 验证,E2.1,误差,,"T=4096, cp=4, B=32",(pred−meas)/meas,,,
+L2 验证,E3.1,端到端 step 时间,model=hstu-base,"T=4096, cp=1 与 cp=4, B=32",跨模型不重标定（判'标定一次'）,,,
+L2 验证,E3.1,端到端 step 时间,model=longer,"T=4096, cp=1 与 cp=4, B=32",跨模型不重标定（判'标定一次'）,,,
+L2 验证,E3.1,对应 CV,,"T=4096, cp=1 与 cp=4, B=32",同一配置的重复测量,,,
+L2 验证,E3.1,模型预测值,,"T=4096, cp=1 与 cp=4, B=32",grcost predict，用 C0 的参数,,,
+L2 验证,E3.1,误差,,"T=4096, cp=1 与 cp=4, B=32",(pred−meas)/meas,,,
+L2 验证,E4.1,端到端 step 时间,kernel=triton,"T=4096, cp=1 与 cp=4, B=32",换 kernel 后 c_star 是否移动（判'标定一次'）,,,
+L2 验证,E4.1,端到端 step 时间,kernel=fused,"T=4096, cp=1 与 cp=4, B=32",换 kernel 后 c_star 是否移动（判'标定一次'）,,,
+L2 验证,E4.1,对应 CV,,"T=4096, cp=1 与 cp=4, B=32",同一配置的重复测量,,,
+L2 验证,E4.1,模型预测值,,"T=4096, cp=1 与 cp=4, B=32",grcost predict，用 C0 的参数,,,
+L2 验证,E4.1,误差,,"T=4096, cp=1 与 cp=4, B=32",(pred−meas)/meas,,,
+L2 验证,E4.1,第二实现的 c_star,,,只重拟合 eff 三参数，其余不动,,,超过则撤'标定一次'
+L2 验证,E2.1,重平衡实测收益,,,block 与 balanced 的时间比减 1,,,MTGR 布局下应远小于文献的 37%
+G  门禁,G0,同点 CV < 5%,,,放弃细粒度判据，不拟合 gamma,,,判定结果填 pass / fail / 不可测
+G  门禁,G1,c_star 与 c_comm 同量级（10× 内）,,,曲线在吸收别的东西，停,,,判定结果填 pass / fail / 不可测
+G  门禁,G2,eff 曲线在扫描区间内有拐点,,,扩区间，不是加参数,,,判定结果填 pass / fail / 不可测
+G  门禁,G3,重平衡收益 ≤ 2−1/cp,,,闭式或掩码假设错,,,判定结果填 pass / fail / 不可测
+G  门禁,G4,cp=1 的 MAPE < 5%,,,工作量计数器错，停止标定,,,判定结果填 pass / fail / 不可测
+G  门禁,G5,换 kernel 后 c_star 移动 < 3×,,,撤'标定一次',,,判定结果填 pass / fail / 不可测
+G  门禁,G6,跨模型误差 < 20%,,,改为按模型标定，缩小 claim,,,判定结果填 pass / fail / 不可测

@@ -23,7 +23,8 @@ class RankWork:
     flops_attn: float
     bytes_ew: float      # elementwise traffic over the attention matrix
     bytes_kv: float      # what this rank must ship for CP
-    rounds: int = 0      # collective rounds; ring needs cp-1, not 1
+    rounds: int = 0      # collectives per step (layers x buckets)
+    collective: str = "all_gather"
     notes: str = ""
 
     @property
@@ -41,6 +42,8 @@ def rank_work(
     ew_ops_per_pair: float = 3.0,
     dtype_bytes: int = FP16,
     kv_bytes_per_token: int = 0,
+    buckets: int = 1,
+    collective: str = "all_gather",
 ) -> List[RankWork]:
     """Work on every CP rank.  ``model`` is an HstuModel or LongerModel."""
     d = model.d
@@ -74,7 +77,7 @@ def rank_work(
     # so at cp=1 there are none -- charging a flat one latency per layer is what
     # puts a spurious fixed cost into the CP=1 baseline and biases every speedup
     # computed against it.
-    rounds = _rounds(scheme, cp, comm_layers)
+    rounds = _rounds(scheme, cp, comm_layers, buckets)
 
     per_pair = model.attn_flops_per_pair() if hasattr(model, "attn_flops_per_pair") else 4.0 * d
     out = []
@@ -90,26 +93,32 @@ def rank_work(
                 bytes_ew=ew_ops_per_pair * dtype_bytes * pairs[r],
                 bytes_kv=bytes_kv[r],
                 rounds=rounds,
+                collective=collective,
             )
         )
     return out
 
 
-def _rounds(scheme: str, cp: int, comm_layers: int) -> int:
-    """Collective rounds per step for a given CP scheme.
+def _rounds(scheme: str, cp: int, comm_layers: int,
+            buckets: int = 1) -> int:
+    """Collectives per step.
 
-    ``block``/``balanced``/``striped`` are all ring-like: ``cp-1`` hops per
-    sharded layer. An all-to-all variant issues one collective per layer. At
-    ``cp == 1`` every scheme issues zero, which is the case that matters for a
-    correct baseline.
+    This is the count of times you pay *message latency*, and it is the quantity
+    a jagged implementation multiplies without meaning to: one collective per
+    layer is 15, one per (layer, bucket) is 15*B.  It is deliberately separate
+    from the per-collective step count inside :mod:`grcost.comm`.
+
+    ``all_gather`` (the CP implementation we are modelling) issues one collective
+    per sharded layer -- the ``cp-1`` hops happen *inside* that collective, which
+    is why the hop count belongs in ``comm.steps``, not here.  Counting both takes
+    the latency term ``cp-1`` times too large, which is exactly the error that
+    produced the earlier "communication dominates" conclusion.
     """
     if cp <= 1 or comm_layers <= 0:
         return 0
-    if scheme in ("block", "balanced", "striped", "ring"):
-        return (cp - 1) * comm_layers
     if scheme in ("a2a", "all_to_all"):
-        return comm_layers
-    return (cp - 1) * comm_layers
+        return comm_layers * buckets
+    return comm_layers * buckets
 
 
 def imbalance(works: List[RankWork]) -> float:

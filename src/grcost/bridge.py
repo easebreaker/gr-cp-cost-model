@@ -145,8 +145,8 @@ def decompose(
 
     works_n = rank_work(model, layout, T, B, cp=n, scheme=scheme)
     w = works_n[0]
-    comm_ms = ((1.0 - p.overlap) * (w.rounds * p.alpha
-                                    + w.bytes_kv / p.bw_comm)) * 1e3
+    cm = p.comm_model()
+    comm_ms = cm.time(n, w.bytes_kv, rounds=w.rounds) * 1e3
 
     eff_ratio = efficiency(p, float(T)) / max(efficiency(p, float(T / n)), 1e-12)
 
