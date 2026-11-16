@@ -104,6 +104,7 @@ with torch_npu.profiler.profile(
 |---|---|---|---|---|
 | M1.1/M1.2 | 同输入重复性 | 同一配置连测 10 次 ×3 组，在最短路/最长序列各一组 | **CV（噪声底）** | CV > 5% → 放弃细粒度判据（G0） |
 | M2.1 | 下发成本 | 空 kernel 循环 `n = 1/8/64/256` | `c_dispatch` (μs/launch) | 斜率是否 ∝ n；`t_fixed` 由此定 |
+| M2.3 | **不可切部分** | 把 dense 主干换 no-op，只留 embedding + 稀疏 all2all + 优化器 | `t_fixed` 的第二条独立口径 | 与 M2.1 同量级才可信 |
 | M2.2 | 单次启动 vs 重复 | 同一 kernel 打 1/2/4/8 次 | 每启动成本 | 与 M2.1 一致 |
 | M3.1 | HBM 带宽 | 64/256 MB 纯 copy | `bw_util = 实测/标称` | 这个数**必须 pin**，不能拟合 |
 | M3.2 | 可达算力 | 4096³ matmul，工作 dtype | `eff_inf` 上限 | 与标称 328 TFLOPS(bf16) 的比值 |
@@ -290,6 +291,106 @@ G0 噪声(M1)  →  M2/M3/M4 常数  →  M5 通信  →  M6 显存
 - [ ] 门禁表在看数据前已定稿
 
 ---
+
+## 8.5 两个已经发生过的偏差（必读）
+
+首轮实测里出现过两个偏差。它们不是"数据不准"，而是**建模与测量口径不一致**，而且都会给出内部自洽的错误结果。两条都已修进代码，也各有回归测试（`tests/test_granularity.py`）。
+
+### 偏差 1：绝对时间偏低 —— 层粒度错配
+
+**现象**：compose 预测的绝对时间明显偏低。
+
+**根因**：`sweep.py` 计时的是**单个 HSTU block**（`--layers 1`），而 `extract_eff` 用**整模型 15 层**的 FLOPs 去除它。于是
+
+```
+eff = flops_15 / t_1layer = 15 × eff_true
+```
+
+预测时 `t = flops_15 / (P · eff)` 又变回 **1 层的时间**。误差正好是 `n_layers = 15` 倍。
+
+**为什么难发现**：拟合本身是自洽的（rmse 仍很小），因为 15 倍被分子分母各吃了一次。只有和实测的整模型时间比对才会暴露。
+
+**更糟的一点**：这**不是纯比例误差**。L² 的逐元素项也要从测量时间里减掉，错配时它被减了 15 倍 —— 于是长序列点直接 `nan`（"elementwise term exceeds total"），短序列点则被放大超过 15 倍（实测比例 19.2×）。所以效曲线不仅被缩放，**形状也被扭曲**，无法靠一个常数修正。
+
+**修法**（两条路，任选其一，但必须显式声明）：
+
+```bash
+# 路 A：直接测整栈，最安全
+python scripts/npu/sweep.py --only eff --layers 15
+
+# 路 B：测单块（便宜），但必须声明深度
+python scripts/npu/sweep.py --only eff --layers 1
+python scripts/npu/e2e.py compose ... --layers-measured 1
+```
+
+`harness.write_micro` 会把 `layers` 写进 CSV 的 `layers` 列，`e2e.py compose` 会自己读；列缺失时会**明确警告**，而不是默认当成 1。
+
+**判据**：`--check-csv` 报告的 `median pred/measured` 如果接近 `1/n_layers`，就是这类错误。
+
+### 偏差 2：加速比偏低 —— 不可切部分缺失 + 通信高估
+
+**现象**：预测的 CP 加速比低于实测。
+
+**两个独立原因**：
+
+1. **没有 `t_fixed`**。embedding 查表、稀疏 all2all、优化器、dataloader 都不随 CP 缩小。缺了它会把基线 `t(1)` 算小，进而把加速比算歪（方向取决于哪个误差主导，所以不能凭直觉判断）。
+2. **通信用了默认值**。`--overlap` 默认 0.5、`bw_comm` 来自 `micro.csv` 或在缺失时退回标称链路带宽。标称值和实测差很多（910B 标称 392 GB/s，实测 8 卡 AllGather 149 GB/s），而且 CP 走的是 ring/all2all 而不是 all-reduce。
+
+**顺带修掉的一个真实建模错误**：`alpha`（每次集合通信延迟）原来在 **CP=1 时也计一次**，但那时根本没有集合通信。这让 CP=1 的基线凭空多出 `0.5 × 25μs`，污染了所有加速比。已改为按**轮次**计：
+
+```
+rounds = (cp - 1) × sharded_layers        # ring
+rounds = sharded_layers                   # all-to-all
+=> cp = 1 时 rounds = 0，通信项严格为 0
+```
+
+**修法**：
+
+```bash
+python scripts/npu/micro.py --only dispatch        # 两个独立口径定 t_fixed
+python scripts/npu/e2e.py compose ... --t-fixed 6.0 \
+    --check-csv data/npu_calibration.csv
+```
+
+`--t-fixed` 缺失时会打印明确警告并说明后果，不再静默取 0。
+
+### 这两个偏差怎么区分：用归因表，不要猜
+
+`cost.attribute()` 把 `实际时间` 拆成四项，增量严格相加等于 `predict`：
+
+```
+stage 0  t_fixed + shard_1/cp      完美效率、完美均衡、无通信
+stage 1  + 效率损失                用 eff(c) 而非 eff(T)，rank 取均值
+stage 2  + 负载不均衡              取 max 而非均值
+stage 3  + 暴露通信                == cost.predict
+```
+
+实测输出（910B 参数，`T=4096`，`B=32`）：
+
+```
+t_fixed = 6 ms
+   cp   step ms  speedup  ideal   fixed     eff   imbal    comm
+    1    395.01     1.00      1   1.5%   0.0%   0.0%   0.0%
+    8    197.08     2.00      8   3.0%  55.3%   5.1%  11.8%
+
+t_fixed = 60 ms（embedding 很重）
+   cp   step ms  speedup  ideal   fixed     eff   imbal    comm
+    1    449.01     1.00      1  13.4%   0.0%   0.0%   0.0%
+    8    251.08     1.79      8  23.9%  43.4%   4.0%   9.3%
+```
+
+读法：
+
+- **`fixed` 列**告诉你"不可切部分"占多少。它是 `t_fixed` 对不对的直接指标；这一列从 3% 跳到 24%，加速比就从 2.00 掉到 1.79。
+- **`eff` 列**通常最大（55%）。如果实测的加速比远低于预测，而 `comm` 只有 12%，那么问题**不在通信**，在效率曲线或层粒度。
+- **`comm` 列**。如果它显著大于 `eff`，说明通信项被高估了（检查 `bw_comm` 是否用了 ring 的实测值、`overlap` 是否拍了个值）。
+
+这张表的作用是**把"我觉得通信算多了"变成"comm 占 11.8%，而 eff 占 55.3%，所以不是通信"**。
+
+### 两条经验
+
+1. **测量的粒度和预测的粒度必须显式对齐。** 不要依赖"大家心里都清楚"——把它写进 CSV 的列、写进 CLI 的参数、写进测试。
+2. **任何从测量里减掉的项，其尺度必须和测量一致。** 逐元素字节项、`t_fixed`、层数缩放，三者都要么全按整模型算，要么全按单块算。混了就产生"看起来能拟合、但物理错误"的结果。
 
 ## 9. 与已有 31 条方案的分工
 

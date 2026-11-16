@@ -28,12 +28,20 @@ from harness import Device, Timing, measure, print_environment, write_micro  # n
 
 
 def _layer(dev, args):
-    from hstu_layer import HstuLayer
+    """One block, or a stack of ``args.layers`` of them.
+
+    Measuring the whole stack is the safe default when the thing you will
+    predict is the whole model: a 1-layer time must never be combined with an
+    N-layer FLOP count.  ``extract_eff(layers_measured=...)`` handles the
+    scaling when you do prefer the cheaper single-block sweep, but then the
+    number has to be *declared*, not assumed.
+    """
+    from hstu_layer import HstuStack
 
     dt = {"fp16": dev.torch.float16, "bf16": dev.torch.bfloat16,
           "fp32": dev.torch.float32}[args.dtype]
-    return HstuLayer(args.d, args.heads, args.attn_dim, args.value_dim,
-                     dtype=dt).to(dev.kind).eval()
+    return HstuStack(args.d, args.layers, args.heads, args.attn_dim,
+                     args.value_dim, dtype=dt).to(dev.kind).eval()
 
 
 def _mask(args, T, share=0.85, cand=40, static_full=True, device="cpu", dtype=None):
@@ -71,11 +79,11 @@ def job_eff(dev, args) -> List[Timing]:
 
 
 def layer_flops(args, T, B) -> float:
-    """Structural FLOPs of one layer -- from grcost, not from the module."""
+    """Structural FLOPs of the timed stack -- from grcost, not from the module."""
     from grcost.presets import hstu_layout
     from grcost.spec import HstuModel
 
-    m = HstuModel("bench", d=args.d, n_layers=1, n_heads=args.heads,
+    m = HstuModel("bench", d=args.d, n_layers=args.layers, n_heads=args.heads,
                   attn_dim=args.attn_dim, value_dim=args.value_dim)
     return m.dense_flops_per_rank(T, B, 1) + B * m.attn_flops_per_pair() * \
         hstu_layout(T).pairs_total()
@@ -264,6 +272,9 @@ def main(argv=None) -> int:
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--device", default="auto")
     ap.add_argument("--dtype", default="bf16", choices=["fp16", "bf16", "fp32"])
+    ap.add_argument("--layers", type=int, default=1,
+                    help="depth of the timed stack; must match what you predict. "
+                         "1 = single HSTU block (cheap), 15 = mtgr-large")
     ap.add_argument("--d", type=int, default=768)
     ap.add_argument("--heads", type=int, default=3)
     ap.add_argument("--attn-dim", type=int, default=None)
@@ -298,7 +309,7 @@ def main(argv=None) -> int:
         for t in timings:
             print(t.line())
         if timings:
-            write_micro(args.out, j, timings)
+            write_micro(args.out, j, timings, layers=args.layers)
         print()
     print(f"written to {args.out}")
     return 0

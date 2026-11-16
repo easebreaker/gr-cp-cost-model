@@ -74,6 +74,29 @@ class HstuLayer(nn.Module):
         return x + self.norm_attn(self.out(attn * gate))
 
 
+class HstuStack(nn.Module):
+    """``n_layers`` HSTU blocks, so you can time the depth you will predict.
+
+    The single-block version is cheaper (and its ``eff`` transfers, because
+    ``eff`` is a kernel property), but only if the analysis *knows* it was one
+    block.  Timing the stack removes that assumption entirely.
+    """
+
+    def __init__(self, d: int = 768, n_layers: int = 1, n_heads: int = 3,
+                 attn_dim: Optional[int] = None, value_dim: Optional[int] = None,
+                 dtype=torch.float16):
+        super().__init__()
+        self.layers = nn.ModuleList(
+            HstuLayer(d, n_heads, attn_dim, value_dim, dtype=dtype)
+            for _ in range(n_layers)
+        )
+
+    def forward(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None):
+        for layer in self.layers:
+            x = layer(x, mask)
+        return x
+
+
 # --------------------------------------------------------------------------
 # Mask families -- three regions, built on the host once per shape
 # --------------------------------------------------------------------------

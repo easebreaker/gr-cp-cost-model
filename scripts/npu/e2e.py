@@ -59,6 +59,22 @@ def eff_measurements(sweep_csv: str) -> List[Tuple[int, float]]:
     return sorted(out)
 
 
+def layers_measured(sweep_csv: str) -> Optional[int]:
+    """Depth of the timed module, from the ``layers`` column.
+
+    Returns ``None`` when the column is absent (an older CSV), which the caller
+    must treat as "unknown" rather than "1": guessing wrong here is a
+    factor-of-N error in the extracted efficiency.
+    """
+    vals = {int(float(r["layers"])) for r in read_timings(sweep_csv, "eff")
+            if r.get("layers") not in (None, "")}
+    if not vals:
+        return None
+    if len(vals) > 1:
+        raise SystemExit(f"mixed layer counts in {sweep_csv}: {sorted(vals)}")
+    return vals.pop()
+
+
 def collective_points(micro_csv: str) -> List[Tuple[str, int, float]]:
     """``(collective, bytes, ms)`` from the ``collective`` job."""
     out = []
@@ -103,7 +119,7 @@ def fit_comm(points: List[Tuple[str, int, float]]) -> Tuple[float, float, str]:
 # --------------------------------------------------------------------------
 def cmd_compose(args) -> int:
     from grcost.compose import extract_eff, fit_curve, report
-    from grcost.cost import Params, predict
+    from grcost.cost import Params, attribution_report, predict
     from grcost.hardware import get as get_hw
     from grcost.presets import resolve_model, resolve_layout
 
@@ -117,12 +133,39 @@ def cmd_compose(args) -> int:
         print("run: python scripts/npu/sweep.py --only eff")
         return 2
 
+    # --- layer granularity: the factor-of-N trap -------------------------
+    n_meas = args.layers_measured or layers_measured(args.sweep)
+    if n_meas is None:
+        print("WARNING: the sweep CSV has no `layers` column. Assuming the timed")
+        print("         module had model.n_layers layers. If it was a single")
+        print("         block, pass --layers-measured 1 or the prediction will")
+        print("         come out n_layers times too fast.")
+        n_meas = model.n_layers
+    if n_meas != model.n_layers:
+        print(f"  timed module depth: {n_meas} layer(s); prediction target: "
+              f"{model.n_layers} layer(s)")
+        print(f"  -> eff is solved on {n_meas} layer(s) and applied to the full "
+              f"model (a kernel property, so it transfers)")
+
+    # --- t_fixed: required, not optional --------------------------------
+    if args.t_fixed <= 0:
+        print()
+        print("WARNING: --t-fixed is 0. Everything that does not shard")
+        print("         (embedding lookup, sparse all2all, optimizer, dataloader)")
+        print("         is then missing from the baseline. Consequences:")
+        print("           * absolute step time too low")
+        print("           * speedup wrong in either direction, depending on which")
+        print("             of the two errors dominates")
+        print("         Measure it with `micro.py --only dispatch` (two independent")
+        print("         routes: layer-count slope and empty-kernel slope).")
+
     base = Params(bw_util=args.bw_util, recompute=args.recompute,
                   overlap=args.overlap)
     pts = extract_eff(model, lambda T: resolve_layout(layout_name, T), meas, hw,
                       B=args.B, t_fixed_ms=args.t_fixed,
-                      bw_util=args.bw_util, recompute=args.recompute)
-    params, rmse = fit_curve(pts)
+                      bw_util=args.bw_util, recompute=args.recompute,
+                      layers_measured=n_meas)
+    params, rmse = fit_curve(pts, p0=base)
     print(report(pts, params, rmse))
 
     alpha, bw, note = fit_comm(collective_points(args.micro))
@@ -134,11 +177,12 @@ def cmd_compose(args) -> int:
         print(f"\n  collective: {note} -- falling back to nominal link bandwidth")
         params = params.copy(alpha=params.alpha, bw_comm=hw.link_bw)
 
+    cps = [1] + [int(x) for x in args.cps.split(",")]
     print("\n  composed CP prediction (no CP run used as input):")
     print(f"  {'CP':>3} {'chunk':>7} {'ms':>9} {'speedup':>8} {'eff':>6} "
           f"{'imbal':>6} {'comm_ms':>8}")
     base_ms = None
-    for cp in [1] + [int(x) for x in args.cps.split(",")]:
+    for cp in cps:
         lay = resolve_layout(layout_name, args.T)
         ms, bd = predict(model, lay, args.T, args.B, cp, hw, params,
                          t_fixed_ms=args.t_fixed, scheme=args.scheme, detail=True)
@@ -146,6 +190,15 @@ def cmd_compose(args) -> int:
             base_ms = ms
         print(f"  {cp:>3} {bd['chunk']:>7.0f} {ms:>9.2f} {base_ms / ms:>8.2f} "
               f"{bd['eff']:>6.3f} {bd['imbalance']:>6.2f} {bd['comm_ms']:>8.2f}")
+
+    # --- why the speedup is what it is ---------------------------------
+    print("\n  where the speedup goes (each column is a share of the step):")
+    print(attribution_report(model, resolve_layout(layout_name, args.T),
+                             args.T, args.B, cps, hw, params,
+                             t_fixed_ms=args.t_fixed, scheme=args.scheme))
+
+    if args.check_csv:
+        check_against(args.check_csv, model, hw, params, layout_name)
 
     os.makedirs(args.out, exist_ok=True)
     path = os.path.join(args.out, "params_composed.json")
@@ -162,6 +215,40 @@ def cmd_compose(args) -> int:
                               args.scheme, kernel=args.kernel, tag="composed")
         print(f"  composed rows appended to {args.write_calibration}")
     return 0
+
+
+def check_against(csv_path: str, model, hw, params, layout_name: str) -> None:
+    """Score a composed parameter set against measured end-to-end rows.
+
+    This is the check that catches a granularity mistake: if the parameters were
+    composed from single-block timings but the CSV is full-model steps, the
+    ratio comes out near ``1 / model.n_layers`` and is impossible to miss.
+    """
+    from grcost.fit import load_csv, predict_record
+    from grcost.metrics import report
+
+    recs = load_csv(csv_path)
+    if not recs:
+        print(f"\n  check: {csv_path} has no rows")
+        return
+    pred = [predict_record(r, params, hw) for r in recs]
+    meas = [r.measured_ms for r in recs]
+    print(f"\n  check against {len(recs)} measured rows in {csv_path}:")
+    print("  " + report(pred, meas, [r.group for r in recs]).row("all"))
+    ratios = sorted(p / m for p, m in zip(pred, meas))
+    med = ratios[len(ratios) // 2]
+    print(f"  median pred/measured = {med:.3f}")
+    if 0.05 < med < 0.2:
+        print(f"  >>> looks like a granularity error: ratio near "
+              f"1/{model.n_layers} = {1 / model.n_layers:.3f}.")
+        print(f"      Pass --layers-measured 1 if the sweep timed a single block,")
+        print(f"      or re-run sweep.py --layers {model.n_layers}.")
+    elif med > 3:
+        print("  >>> prediction is far too slow: is t_fixed double counted, or")
+        print("      was the sweep taken with a much smaller batch/model?")
+    for r, p in sorted(zip(recs, pred), key=lambda t: -abs(t[1] / t[0].measured_ms - 1))[:5]:
+        print(f"    {r.describe():<58} pred={p:8.2f} "
+              f"err={(p / r.measured_ms - 1) * 100:+6.1f}%")
 
 
 # --------------------------------------------------------------------------
@@ -231,6 +318,12 @@ def main(argv=None) -> int:
     ap.add_argument("--bw-util", dest="bw_util", type=float, default=0.6)
     ap.add_argument("--overlap", type=float, default=0.5)
     ap.add_argument("--recompute", type=float, default=1.0)
+    ap.add_argument("--layers-measured", dest="layers_measured", type=int,
+                    default=None,
+                    help="depth of the timed module (1 = single block). "
+                         "Defaults to the `layers` column of --sweep.")
+    ap.add_argument("--check-csv", dest="check_csv", default=None,
+                    help="measured end-to-end rows to score the composition against")
     ap.add_argument("--repeats", type=int, default=15)
     args = ap.parse_args(argv)
     return cmd_compose(args) if args.mode == "compose" else cmd_measure(args)

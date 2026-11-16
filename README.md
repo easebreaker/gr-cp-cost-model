@@ -56,6 +56,10 @@ parts:
 * **`grcost.manifest`** — the NPU measurement plan as code: 21 jobs, ~5 h, 72% of
   them runnable *without a CP implementation*, plus the stop/go gates written
   down before any data exists. See `docs/08-npu-experiment-design.md`.
+* **`grcost.cost.attribute`** — splits the gap from perfect scaling into
+  *fixed cost / efficiency / imbalance / communication*, so "the predicted
+  speedup is wrong" becomes a number you can read instead of a hypothesis.
+
 * **`grcost.bridge`** — the existing `timepred` framework's `κ` is *derivable*
   from `eff(c)` and the mask, not fittable. The reconstruction is exact, and it
   predicts that `κ` drifts ~16% from CP=2 to CP=8, so a constant-κ fit
@@ -101,7 +105,7 @@ PYTHONPATH=src python scripts/check_cp_table.py        # reads the RecSys'25 CP 
 Tests:
 
 ```bash
-PYTHONPATH=src python -m unittest discover -s tests -v     # 103 tests
+PYTHONPATH=src python -m unittest discover -s tests -v     # 120 tests
 ```
 
 > If you are on macOS with the system Python and see the interpreter die with

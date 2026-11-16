@@ -99,6 +99,13 @@ def build_plan(model: str = "mtgr-large", T_ref: int = 4096,
             "one kernel launched n times vs once",
             "separates per-launch cost from per-byte cost",
             repeats=10, est_minutes=1.0),
+        Job("M2.3", "L0", "fixed_cost", {"op": "embedding_and_sparse_only",
+                                         "T": T_ref, "B": B},
+            "the step with the dense backbone stubbed out",
+            "t_fixed by an independent route: embedding + sparse all2all + "
+            "optimizer. Omitting it biases the CP=1 baseline, and therefore "
+            "every speedup computed against that baseline",
+            repeats=10, est_minutes=2.0),
         Job("M3.1", "L0", "hbm_bw", {"op": "stream_copy", "bytes": [1 << 26, 1 << 28]},
             "GB/s of a pure copy/scale at two sizes",
             "bw_util (pin it; do not fit it)",
@@ -142,9 +149,11 @@ def build_plan(model: str = "mtgr-large", T_ref: int = 4096,
             depends_on="M3.1", repeats=9, est_minutes=1.5)
     )
     jobs.append(
-        Job("S1.2", "L1", "eff_curve", {"op": "block_forward", "cp": 1, "T": L},
-            "same sweep through the whole layer (projections + attn + norm)",
-            "splits eff into attention-part and projection-part",
+        Job("S1.2", "L1", "eff_curve", {"op": "block_forward", "cp": 1, "T": L,
+                                        "layers": "must equal the model depth"},
+            "same sweep through the FULL stack (all layers + projections)",
+            "cross-checks S1.1 and fixes the layer granularity: a 1-layer time "
+            "divided by an N-layer FLOP count is an N-fold error",
             depends_on="S1.1", repeats=9, est_minutes=1.5)
     )
     # machine-derived chunk: emulate CP by sharding the sequence by hand

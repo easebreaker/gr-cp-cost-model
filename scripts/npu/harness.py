@@ -188,8 +188,12 @@ def noise_floor(timings: Sequence[Timing]) -> Timing:
 # --------------------------------------------------------------------------
 # Output
 # --------------------------------------------------------------------------
+# `layers` is not decoration: a 1-layer measurement divided by an N-layer FLOP
+# count inflates the extracted efficiency by exactly N, and the resulting
+# prediction silently lands at the per-layer scale. Recording it here is what
+# lets the analysis refuse to make that mistake (grcost.compose.extract_eff).
 MICRO_HEADER = ["job", "label", "median_ms", "iqr_ms", "cv_pct", "n",
-                "peak_mem_gb", "notes"]
+                "peak_mem_gb", "layers", "notes"]
 
 
 def _append_csv(path: str, header: Sequence[str], rows: Sequence[dict]) -> None:
@@ -203,11 +207,14 @@ def _append_csv(path: str, header: Sequence[str], rows: Sequence[dict]) -> None:
             w.writerow({k: r.get(k, "") for k in header})
 
 
-def write_micro(path: str, job: str, timings: Sequence[Timing]) -> str:
+def write_micro(path: str, job: str, timings: Sequence[Timing],
+                layers: int = 0) -> str:
+    """Append timings.  ``layers`` is the depth of the timed module (1 = block)."""
     rows = []
     for t in timings:
         r = t.row()
         r["job"] = job
+        r["layers"] = layers
         rows.append(r)
     _append_csv(path, MICRO_HEADER, rows)
     return path

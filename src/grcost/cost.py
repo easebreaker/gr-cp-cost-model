@@ -131,7 +131,8 @@ def predict(
     for w in works:
         t_comp = w.flops / (hw.peak_flops * eff)
         t_mem = w.bytes_ew / (hw.hbm_bw * p.bw_util) if (abl is None or abl.elementwise) else 0.0
-        t_comm = (p.alpha + w.bytes_kv / p.bw_comm) if (abl is None or abl.comm) else 0.0
+        t_comm = (w.rounds * p.alpha + w.bytes_kv / p.bw_comm) \
+            if (abl is None or abl.comm) else 0.0
         t_rank.append(p.recompute * (t_comp + t_mem) + (1.0 - p.overlap) * t_comm)
 
     crit = max(t_rank) if (abl is None or abl.critical == "max") else (sum(t_rank) / cp)
@@ -147,7 +148,8 @@ def predict(
         "fixed_ms": t_fixed_ms,
         "compute_ms": p.recompute * w.flops / (hw.peak_flops * eff) * 1e3,
         "elementwise_ms": p.recompute * w.bytes_ew / (hw.hbm_bw * p.bw_util) * 1e3,
-        "comm_ms": (1.0 - p.overlap) * (p.alpha + w.bytes_kv / p.bw_comm) * 1e3,
+        "comm_ms": (1.0 - p.overlap) * (w.rounds * p.alpha
+                                       + w.bytes_kv / p.bw_comm) * 1e3,
         "eff": eff,
         "chunk": chunk,
         "crit_rank": crit_rank,
@@ -157,6 +159,100 @@ def predict(
         "amdahl_ceiling": amdahl_ceiling(model, layout, T, cp),
     }
     return total * 1e3, bd
+
+
+def attribute(
+    model,
+    layout: Layout,
+    T: int,
+    B: int,
+    cp: int,
+    hw,
+    p: Params,
+    t_fixed_ms: float = 0.0,
+    scheme: str = "block",
+) -> dict:
+    """Split the gap between perfect scaling and reality into four named parts.
+
+    Built by turning one mechanism on at a time, so the increments sum to the
+    prediction exactly and each has a physical name:
+
+        stage 0   t_fixed + shard_1 / cp          perfect efficiency, balance, no comm
+        stage 1   + efficiency loss               eff(c) instead of eff(T), mean over ranks
+        stage 2   + load imbalance                max over ranks instead of mean
+        stage 3   + exposed communication         == cost.predict
+
+    This is the diagnostic for "the predicted speedup is too low".  Instead of
+    guessing whether the culprit is communication or a missing fixed cost, read
+    the three increments: they are in milliseconds and in percent of the step.
+    """
+    if cp < 1:
+        raise ValueError("cp must be >= 1")
+
+    works1 = rank_work(model, layout, T, B, cp=1, scheme=scheme)
+    works_n = rank_work(model, layout, T, B, cp=cp, scheme=scheme)
+    eff1 = efficiency(p, float(T))
+    effc = efficiency(p, T / cp)
+
+    def comp(w, eff):
+        return p.recompute * (
+            w.flops / (hw.peak_flops * eff)
+            + w.bytes_ew / (hw.hbm_bw * p.bw_util)
+        )
+
+    def exposed_comm(w):
+        return (1.0 - p.overlap) * (w.rounds * p.alpha + w.bytes_kv / p.bw_comm)
+
+    shard_1 = sum(comp(w, eff1) for w in works1)
+    mean_n = sum(comp(w, effc) for w in works_n) / cp
+    worst = max(works_n, key=lambda w: comp(w, effc) + exposed_comm(w))
+    max_n = comp(worst, effc)
+    comm = exposed_comm(worst)
+
+    s0 = t_fixed_ms / 1e3 + shard_1 / cp
+    s1 = t_fixed_ms / 1e3 + mean_n
+    s2 = t_fixed_ms / 1e3 + max_n
+    s3 = t_fixed_ms / 1e3 + max_n + comm
+
+    total = s3
+    return {
+        "cp": cp,
+        "step_ms": total * 1e3,
+        "fixed_ms": (t_fixed_ms / 1e3) * 1e3,
+        "ideal_shard_ms": (shard_1 / cp) * 1e3,
+        "eff_loss_ms": (s1 - s0) * 1e3,
+        "imbalance_loss_ms": (s2 - s1) * 1e3,
+        "comm_ms": (s3 - s2) * 1e3,
+        "speedup": (t_fixed_ms / 1e3 + shard_1) / total,
+        "speedup_ideal": float(cp),
+        # shares of the *step*, which is what a reader can act on
+        "fixed_share": (t_fixed_ms / 1e3) / total,
+        "ideal_share": (shard_1 / cp) / total,
+        "eff_share": (s1 - s0) / total,
+        "imbalance_share": (s2 - s1) / total,
+        "comm_share": (s3 - s2) / total,
+        "eff": effc,
+        "eff_at_cp1": eff1,
+    }
+
+
+def attribution_report(
+    model, layout: Layout, T: int, B: int, cps, hw, p: Params,
+    t_fixed_ms: float = 0.0, scheme: str = "block",
+) -> str:
+    """Table of ``attribute`` over several CP degrees."""
+    head = (f"  {'cp':>3} {'step ms':>9} {'speedup':>8} {'ideal':>6} "
+            f"{'fixed':>7} {'eff':>7} {'imbal':>7} {'comm':>7}")
+    lines = [head]
+    for cp in cps:
+        a = attribute(model, layout, T, B, cp, hw, p, t_fixed_ms, scheme)
+        lines.append(
+            f"  {cp:>3} {a['step_ms']:>9.2f} {a['speedup']:>8.2f} "
+            f"{a['speedup_ideal']:>6.0f} "
+            f"{a['fixed_share']:>6.1%} {a['eff_share']:>6.1%} "
+            f"{a['imbalance_share']:>6.1%} {a['comm_share']:>6.1%}")
+    lines.append("  (columns after 'ideal' are shares of the step; they sum to 100%)")
+    return "\n".join(lines)
 
 
 def amdahl_ceiling(model, layout: Layout, T: int, cp: int, B: int = 1) -> float:

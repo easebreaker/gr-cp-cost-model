@@ -23,6 +23,7 @@ class RankWork:
     flops_attn: float
     bytes_ew: float      # elementwise traffic over the attention matrix
     bytes_kv: float      # what this rank must ship for CP
+    rounds: int = 0      # collective rounds; ring needs cp-1, not 1
     notes: str = ""
 
     @property
@@ -69,6 +70,11 @@ def rank_work(
     comm_layers = sum(ph.n_layers for ph in phases if ph.sharded)
     kv_total = B * T * kv_bytes_per_token * comm_layers
     bytes_kv = [kv_total * (cp - 1) / cp for _ in range(cp)]
+    # Number of collectives actually issued. A ring needs cp-1 hops per layer,
+    # so at cp=1 there are none -- charging a flat one latency per layer is what
+    # puts a spurious fixed cost into the CP=1 baseline and biases every speedup
+    # computed against it.
+    rounds = _rounds(scheme, cp, comm_layers)
 
     per_pair = model.attn_flops_per_pair() if hasattr(model, "attn_flops_per_pair") else 4.0 * d
     out = []
@@ -83,9 +89,27 @@ def rank_work(
                 flops_attn=flops_attn,
                 bytes_ew=ew_ops_per_pair * dtype_bytes * pairs[r],
                 bytes_kv=bytes_kv[r],
+                rounds=rounds,
             )
         )
     return out
+
+
+def _rounds(scheme: str, cp: int, comm_layers: int) -> int:
+    """Collective rounds per step for a given CP scheme.
+
+    ``block``/``balanced``/``striped`` are all ring-like: ``cp-1`` hops per
+    sharded layer. An all-to-all variant issues one collective per layer. At
+    ``cp == 1`` every scheme issues zero, which is the case that matters for a
+    correct baseline.
+    """
+    if cp <= 1 or comm_layers <= 0:
+        return 0
+    if scheme in ("block", "balanced", "striped", "ring"):
+        return (cp - 1) * comm_layers
+    if scheme in ("a2a", "all_to_all"):
+        return comm_layers
+    return (cp - 1) * comm_layers
 
 
 def imbalance(works: List[RankWork]) -> float:
