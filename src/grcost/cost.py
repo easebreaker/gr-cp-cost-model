@@ -44,6 +44,9 @@ class Params:
     v_switch: float = 0.0      # message size where the collective algorithm
                                # switches to ring; 0 = same policy at all sizes
     step_policy: str = "auto"  # "auto"/"rd": ceil(log2 n); "ring": n-1
+    b_cal: float = 32.0        # batch at which eff(c) was fitted.  eff is a
+                               # function of tiles per device, i.e. of B*c, so
+                               # the curve is only valid near this batch.
     t_emb_ms: float = 0.0      # measured single-device lookup time at cp=1
     emb_shard_by_cp: bool = True   # does the lookup run on the CP shard?
     emb_unexplained: float = 1.0   # d_stage - sum(known stages), for reconciliation
@@ -90,6 +93,36 @@ class Params:
     def describe(self, names: Optional[List[str]] = None) -> str:
         names = names or [f.name for f in fields(self)]
         return ", ".join(f"{n}={getattr(self, n):.4g}" for n in names)
+
+
+def eff_coordinate(B: int, chunk: float) -> float:
+    """What the efficiency curve is really a function of: rows per device.
+
+    A kernel's wave fill depends on the total number of row-tiles it launches,
+    which is ``B * c / BM`` -- not ``c`` alone.  The fitted curve ``eff(c)`` is
+    therefore a slice of ``eff(B*c)`` taken at whatever batch the sweep used.
+    Keeping this explicit is what stops a curve calibrated at ``B=32`` from being
+    applied at ``B=1`` and silently over-predicting efficiency by orders of
+    magnitude: that is a 32x move in this coordinate.
+    """
+    return float(B) * float(chunk)
+
+
+def batch_warning(p: Params, B: int) -> Optional[str]:
+    """Say so when the requested batch is outside the calibration range.
+
+    Rule of thumb: within a factor of two the curve is usable (the knee is broad
+    and the fixed terms dominate the residual anyway); beyond that the tile count
+    has moved by more than the whole dynamic range of the fit.
+    """
+    if p.b_cal <= 0 or B <= 0:
+        return None
+    r = max(B / p.b_cal, p.b_cal / B)
+    if r <= 2.0:
+        return None
+    return (f"B={B} against a curve calibrated at B={p.b_cal}: the tile count has "
+            f"moved {r:.0f}x, which is beyond what eff(c) can support. "
+            f"Re-run the L1 sweep --B {B} (5 jobs, ~1.5 h, no CP needed).")
 
 
 def efficiency(p: Params, chunk: float) -> float:
@@ -181,6 +214,9 @@ def predict(
         "comm_steps": cm.steps_for(cp, w.bytes_kv / max(w.rounds, 1)),
         "comm_v_star_mb": cm.break_even_bytes(cp) / 1e6,
         "t_emb_ms": p.t_emb_for(cp),
+        "tokens_per_device": B * T / cp,
+        "tiles_per_device": eff_coordinate(B, T / cp) / 128.0,   # BM=128 prior
+        "batch_warning": batch_warning(p, B),
         "eff": eff,
         "chunk": chunk,
         "crit_rank": crit_rank,

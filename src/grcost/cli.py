@@ -64,6 +64,11 @@ def cmd_break_even(args):
 
 
 def cmd_predict(args):
+    from .cost import batch_warning
+
+    warn = batch_warning(_params(args), args.B)
+    if warn:
+        print(f"WARNING: {warn}\n")
     m = resolve_model(args.model)
     lay = resolve_layout(args.layout, args.T)
     hw = get_hw(args.hardware)
@@ -83,6 +88,11 @@ def cmd_predict(args):
 
 
 def cmd_sweep(args):
+    from .cost import batch_warning
+
+    warn = batch_warning(_params(args), args.B)
+    if warn:
+        print(f"WARNING: {warn}\n")
     m = resolve_model(args.model)
     hw = get_hw(args.hardware)
     p = _params(args)

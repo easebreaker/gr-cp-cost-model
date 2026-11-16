@@ -164,6 +164,9 @@ def registry(T_ref: int = 4096, B: int = 32, L: Sequence[int] = (512, 1024, 2048
           "同上", "", requires="T_max"))
 
     # ---------------- L1 -------------------------------------------------
+    a(Row("L1", "decl", "标定时的 batch", "b_cal", "sample", "declared",
+          "sweep.py --B 的值", f"= {B}",
+          note="eff 是 B*T/CP 的函数；预测时的 batch 与它相差不得超过 2 倍（G7）"))
     a(Row("L1", "decl", "计时模块的层数", "layers", "layer", "declared",
           "sweep.py --layers 的值", f"= {model_layers} 或 1",
           note="必须与预测目标一致，否则 eff 错 n_layers 倍"))

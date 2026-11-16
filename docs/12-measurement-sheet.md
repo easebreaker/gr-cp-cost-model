@@ -61,6 +61,7 @@
 
 | 作业 | 指标 | 符号 | 单位 | 来源 | 怎么得到 | 期望/判据 | 依赖 | 变体 | 固定配置 | 值 | CV |
 |---|---|---|---|---|---|---|---|---|---|---|---|
+| decl | 标定时的 batch | `b_cal` | sample | declared | sweep.py --B 的值<br>eff 是 B*T/CP 的函数；预测时的 batch 与它相差不得超过 2 倍（G7） | = 32 |  |  |  |  |  |
 | decl | 计时模块的层数 | `layers` | layer | declared | sweep.py --layers 的值<br>必须与预测目标一致，否则 eff 错 n_layers 倍 | = 15 或 1 |  |  |  |  |  |
 | S1.1 | 单层/整栈扫描：序列长度<br>*每* `T=512\|T=1024\|T=2048\|T=4096\|T=8192\|T=16384` | `T` | token | declared | sweep.py --lengths |  |  | T=512\|T=1024\|T=2048\|T=4096\|T=8192\|T=16384 |  |  |  |
 | S1.1 | 对应中位数时间 | `t_med` | ms | measured | 固定协议：warmup5 / 中位数15 / 前后 synchronize / 不 flush |  |  |  |  |  |  |

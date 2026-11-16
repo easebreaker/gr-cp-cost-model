@@ -194,6 +194,7 @@ PYTHONPATH=src python scripts/read_fill.py data/measurement_fill.md
 
 | 指标 | 变体 | 怎么测 | 依赖 | 值 | CV% |
 |:--|:--|:--|:--|:--|:--|
+| 标定时的 batch *(`b_cal`)* _sample_ |  | sweep.py --B 的值 |  |  |  |
 | 计时模块的层数 *(`layers`)* _layer_ |  | sweep.py --layers 的值 |  |  |  |
 
 ## S1.1 · 效率曲线 eff(c) —— 唯一要拟合的东西

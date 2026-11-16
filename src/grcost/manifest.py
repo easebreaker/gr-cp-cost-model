@@ -287,6 +287,11 @@ def gates(jobs: Sequence[Job]) -> str:
         "        drop the 'calibrate once' claim; it is a kernel-specific model",
         "  G6  E3.1  cross-model error < 20% with no re-calibration",
         "        else report per-model calibration and reduce the claim",
+        "  G7  batch consistency",
+        "        every L1 point must be measured at the batch you will predict at",
+        "        (or within 2x of it). eff is a function of B*T/CP, not of T/CP:",
+        "        a curve fitted at B=32 applied at B=1 is a 32x move in the tile",
+        "        count, which the fit cannot support. Cost of fixing: 5 jobs, no CP.",
     ])
 
 
