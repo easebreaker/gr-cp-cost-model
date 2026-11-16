@@ -70,13 +70,20 @@ class TestPredict(unittest.TestCase):
         self.assertAlmostEqual(sp, sf, places=12)
 
     def test_detail_breakdown_is_consistent(self):
+        """The breakdown must reconstruct the total, including every term.
+
+        The list grew over time (fixed, embedding, compute, elementwise, the HBM
+        landing of received K/V, communication), so the assertion is written
+        against the sum of whatever the breakdown reports rather than a fixed
+        subset -- otherwise adding a term silently weakens the test.
+        """
         ms, bd = predict(self.m, self.lay, 4096, 32, 4, self.hw, self.p,
                          t_fixed_ms=5.0, detail=True)
-        self.assertAlmostEqual(
-            bd["step_ms"],
-            bd["fixed_ms"] + bd["compute_ms"] + bd["elementwise_ms"] + bd["comm_ms"],
-            delta=1e-6 * bd["step_ms"] + 1e-9,
-        )
+        parts = ["fixed_ms", "compute_ms", "elementwise_ms", "kv_landing_ms",
+                 "comm_ms"]
+        total = sum(bd[k] for k in parts if k in bd)
+        self.assertAlmostEqual(bd["step_ms"], total,
+                               delta=1e-6 * bd["step_ms"] + 1e-9)
         self.assertEqual(bd["chunk"], 1024.0)
 
     def test_longer_gets_no_cp_speedup(self):

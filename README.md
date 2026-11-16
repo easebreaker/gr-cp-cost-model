@@ -138,7 +138,7 @@ PYTHONPATH=src python scripts/check_cp_table.py        # reads the RecSys'25 CP 
 Tests:
 
 ```bash
-PYTHONPATH=src python -m unittest discover -s tests -v     # 208 tests
+PYTHONPATH=src python -m unittest discover -s tests -v     # 248 tests
 ```
 
 > If you are on macOS with the system Python and see the interpreter die with
@@ -174,6 +174,7 @@ src/grcost/
   compose.py     solve eff(c) from a CP=1 sweep (no joint fitting)
   bridge.py      derive the timepred framework's κ from structure
   manifest.py    the NPU measurement plan + gates, as data
+  tiling.py      tile quantisation and the head-parallel CP constraint
   quality.py     [tier 3] power-law quality model + identifiability guard
   frontier.py    [tier 3] throughput/memory/quality composition, alpha* threshold
   presets.py     HSTU / MTGR / LONGER configurations

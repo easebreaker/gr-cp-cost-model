@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from typing import List, Optional
 
 from .spec import Layout, Phase, assign
+from .tiling import DEFAULT_BM, alignment_factor
 
 FP16 = 2  # bytes per element
 
@@ -25,6 +26,8 @@ class RankWork:
     bytes_kv: float      # what this rank must ship for CP
     rounds: int = 0      # collectives per step (layers x buckets)
     collective: str = "all_gather"
+    align: float = 1.0   # tile-quantisation work multiplier (>= 1)
+    kv_hbm: float = 0.0  # HBM traffic caused by landing the received K/V
     notes: str = ""
 
     @property
@@ -44,6 +47,9 @@ def rank_work(
     kv_bytes_per_token: int = 0,
     buckets: int = 1,
     collective: str = "all_gather",
+    bm: int = DEFAULT_BM,
+    quantise: bool = True,
+    comm_lands_in_hbm: bool = True,
 ) -> List[RankWork]:
     """Work on every CP rank.  ``model`` is an HstuModel or LongerModel."""
     d = model.d
@@ -80,9 +86,15 @@ def rank_work(
     rounds = _rounds(scheme, cp, comm_layers, buckets)
 
     per_pair = model.attn_flops_per_pair() if hasattr(model, "attn_flops_per_pair") else 4.0 * d
+    chunk = T / cp
+    # Tile quantisation: a partial last tile wastes multiply lanes.  It scales the
+    # *attention* work only -- a partial tile does not waste elementwise traffic,
+    # since that is driven by the pairs that exist, not by the lanes that do not.
+    align = alignment_factor(chunk, T, bm) if (quantise and cp > 1) else 1.0
     out = []
     for r in range(cp):
-        flops_attn = per_pair * pairs[r]  # QK^T + AV summed over heads
+        # FLOPs of a partial tile are launched whether or not they carry work
+        flops_attn = per_pair * pairs[r] * align
         out.append(
             RankWork(
                 rank=r,
@@ -94,6 +106,8 @@ def rank_work(
                 bytes_kv=bytes_kv[r],
                 rounds=rounds,
                 collective=collective,
+                align=align,
+                kv_hbm=bytes_kv[r] if comm_lands_in_hbm else 0.0,
             )
         )
     return out

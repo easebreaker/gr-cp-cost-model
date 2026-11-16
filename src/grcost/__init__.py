@@ -22,6 +22,9 @@ from .memory import MemoryFit, check_table, estimate_act_bytes_per_token, fit_me
 from .metrics import Report, by_group, kendall_tau, mape, report
 from .presets import MODELS, list_models, mtgr_layout, resolve_layout, resolve_model
 from .spec import HstuModel, Layout, LongerModel, Phase, assign, crossover_report, work_per_rank
+from .tiling import (alignment_factor, alignment_table, best_aligned,
+                     ring_admissible, scheme_tension, ulysses_admissible,
+                     usefulness)
 from .work import RankWork, flops_per_example, imbalance, rank_work, total_flops
 
 __version__ = "0.1.0"
@@ -39,6 +42,8 @@ __all__ = [
     "CPDecomposition", "decompose", "kappa_drift",
     "EffPoint", "extract_eff", "fit_curve",
     "Job", "build_plan", "cost_report", "gates",
+    "alignment_factor", "alignment_table", "best_aligned", "ring_admissible",
+    "scheme_tension", "ulysses_admissible", "usefulness",
     "QualityLaw", "QualityPoint", "fit_quality",
     "Point", "best", "pareto", "breakeven_alpha", "throughput_tokens_per_hour",
     "gpu_hours_for_tokens", "tokens_for_quality", "longer_only",

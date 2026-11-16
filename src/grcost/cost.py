@@ -47,6 +47,14 @@ class Params:
     b_cal: float = 32.0        # batch at which eff(c) was fitted.  eff is a
                                # function of tiles per device, i.e. of B*c, so
                                # the curve is only valid near this batch.
+    fixpipe_hops: float = 3.0  # HBM passes over the L^2 score matrix: write from
+                               # L0C, read back to UB, plus the mask/bias read.
+                               # DAV_2201 (910B/C) has no L0C->UB path, so the
+                               # matrix must land in GM in between; A5 (DAV_3510)
+                               # adds the direct path and drops this toward 2.
+    quantise_tiles: bool = True    # apply tile quantisation to attention work
+    comm_lands_in_hbm: bool = True  # received K/V occupies HBM and contends with
+                                    # the fixpipe traffic
     t_emb_ms: float = 0.0      # measured single-device lookup time at cp=1
     emb_shard_by_cp: bool = True   # does the lookup run on the CP shard?
     emb_unexplained: float = 1.0   # d_stage - sum(known stages), for reconciliation
@@ -181,7 +189,9 @@ def predict(
     if abl is not None and abl.layout_override == "causal":
         layout = Layout.causal(T)
 
-    works = rank_work(model, layout, T, B, cp=cp, scheme=scheme)
+    works = rank_work(model, layout, T, B, cp=cp, scheme=scheme,
+                      quantise=p.quantise_tiles,
+                      comm_lands_in_hbm=p.comm_lands_in_hbm)
     chunk = T / cp
     eff = efficiency(p, chunk) if (abl is None or abl.efficiency) else 1.0
 
@@ -189,10 +199,17 @@ def predict(
     t_rank = []
     for w in works:
         t_comp = w.flops / (hw.peak_flops * eff)
-        t_mem = w.bytes_ew / (hw.hbm_bw * p.bw_util) if (abl is None or abl.elementwise) else 0.0
+        # fixpipe_hops / 3 rescales the elementwise byte count from the historical
+        # "3 passes" prior to whatever the fixpipe path actually costs.
+        ew_bytes = w.bytes_ew * (p.fixpipe_hops / 3.0)
+        t_mem = ew_bytes / (hw.hbm_bw * p.bw_util) if (abl is None or abl.elementwise) else 0.0
+        # Landing the received K/V consumes HBM too, at the same bandwidth the
+        # fixpipe write-back uses.  Charging it turns "communication is a link
+        # cost" into "communication is a link cost plus an HBM cost".
+        t_land = w.kv_hbm / (hw.hbm_bw * p.bw_util) if (abl is None or abl.elementwise) else 0.0
         t_comm = cm.time(cp, w.bytes_kv, rounds=w.rounds) \
             if (abl is None or abl.comm) else 0.0
-        t_rank.append(p.recompute * (t_comp + t_mem) + t_comm)
+        t_rank.append(p.recompute * (t_comp + t_mem + t_land) + t_comm)
 
     crit = max(t_rank) if (abl is None or abl.critical == "max") else (sum(t_rank) / cp)
     total = t_fixed_ms / 1e3 + p.t_emb_for(cp) / 1e3 + crit
@@ -206,7 +223,12 @@ def predict(
         "step_ms": total * 1e3,
         "fixed_ms": t_fixed_ms + p.t_emb_for(cp),
         "compute_ms": p.recompute * w.flops / (hw.peak_flops * eff) * 1e3,
-        "elementwise_ms": p.recompute * w.bytes_ew / (hw.hbm_bw * p.bw_util) * 1e3,
+        "elementwise_ms": (p.recompute * w.bytes_ew * (p.fixpipe_hops / 3.0)
+                           / (hw.hbm_bw * p.bw_util) * 1e3),
+        "kv_landing_ms": (p.recompute * w.kv_hbm
+                          / (hw.hbm_bw * p.bw_util) * 1e3 if (abl is None or abl.elementwise) else 0.0),
+        "align": w.align,
+        "fixpipe_hops": p.fixpipe_hops,
         "comm_ms": cm.time(cp, w.bytes_kv, rounds=w.rounds) * 1e3,
         "comm_latency_ms": cm.time_split(cp, w.bytes_kv, rounds=w.rounds)[0] * 1e3,
         "comm_bytes_ms": cm.time_split(cp, w.bytes_kv, rounds=w.rounds)[1] * 1e3,
@@ -256,15 +278,20 @@ def attribute(
     if cp < 1:
         raise ValueError("cp must be >= 1")
 
-    works1 = rank_work(model, layout, T, B, cp=1, scheme=scheme)
-    works_n = rank_work(model, layout, T, B, cp=cp, scheme=scheme)
+    works1 = rank_work(model, layout, T, B, cp=1, scheme=scheme,
+                       quantise=p.quantise_tiles,
+                       comm_lands_in_hbm=p.comm_lands_in_hbm)
+    works_n = rank_work(model, layout, T, B, cp=cp, scheme=scheme,
+                        quantise=p.quantise_tiles,
+                        comm_lands_in_hbm=p.comm_lands_in_hbm)
     eff1 = efficiency(p, float(T))
     effc = efficiency(p, T / cp)
 
     def comp(w, eff):
         return p.recompute * (
             w.flops / (hw.peak_flops * eff)
-            + w.bytes_ew / (hw.hbm_bw * p.bw_util)
+            + w.bytes_ew * (p.fixpipe_hops / 3.0) / (hw.hbm_bw * p.bw_util)
+            + w.kv_hbm / (hw.hbm_bw * p.bw_util)
         )
 
     cm = p.comm_model()

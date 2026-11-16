@@ -163,6 +163,18 @@ def build_plan(model: str = "mtgr-large", T_ref: int = 4096,
             depends_on="S1.1", repeats=9, est_minutes=1.5)
     )
     # machine-derived chunk: emulate CP by sharding the sequence by hand
+    # Tile quantisation only shows up at CP degrees that do not divide T evenly,
+    # so the sweep must include odd ones.  Same chunk neighbourhood, different
+    # alignment: cp=3 and cp=5 have non-integral c, cp=4 and cp=8 do not.
+    jobs.append(
+        Job("S1.3", "L1", "quantisation", {"op": "single_layer_attn",
+                                           "cp": [3, 5, 6], "T": T_ref},
+            "the same attention kernel at CP degrees whose chunk is not a "
+            "multiple of the tile height",
+            "the tile-quantisation multiplier: work = 1/useful(c). The gap "
+            "between cp=4 and cp=5 is the effect, with everything else fixed.",
+            depends_on="S1.1", repeats=9, est_minutes=2.5)
+    )
     jobs.append(
         Job("S2.1", "L1", "imbalance", {"op": "shard_queries", "cp": cp_grid,
                                         "scheme": ["block", "balanced", "striped"],
@@ -287,6 +299,11 @@ def gates(jobs: Sequence[Job]) -> str:
         "        drop the 'calibrate once' claim; it is a kernel-specific model",
         "  G6  E3.1  cross-model error < 20% with no re-calibration",
         "        else report per-model calibration and reduce the claim",
+        "  G8  tile alignment  (S1.3)",
+        "        at equal chunk, an unaligned cp must cost 1/useful(c) more",
+        "        attention work. cp=3/5/6 vs cp=4/8 tests the closed form; if it",
+        "        does not hold, the kernel is not tile-limited and eff already",
+        "        contains the effect -- do not double count.",
         "  G7  batch consistency",
         "        every L1 point must be measured at the batch you will predict at",
         "        (or within 2x of it). eff is a function of B*T/CP, not of T/CP:",

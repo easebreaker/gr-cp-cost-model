@@ -17,6 +17,7 @@ version.
 | `10-scaling-law.md` | **reserved extension**: composing with a quality law; three tiers; go/no-go |
 | `11-comm-model.md` | why apparent collective bandwidth depends on message size, and the step-count model that replaces piecewise fits |
 | `12-measurement-sheet.md` | the blank data-collection form, by stage and metric (generated) |
+| `13-pipeline-and-formulas.md` | **the whole chain on one page**: every formula, its meaning, how it is measured, and which claim it supports |
 
 ## related-work/
 

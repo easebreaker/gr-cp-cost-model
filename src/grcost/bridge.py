@@ -82,15 +82,22 @@ def _per_rank(model, layout: Layout, T: int, B: int, n: int, hw,
     cost, not a reformulation -- it is slower, and it is the honest fallback if
     the NPU stack's CP prototype does not shard the projection weights.
     """
-    works = rank_work(model, layout, T, B, cp=n, scheme=scheme)
+    works = rank_work(model, layout, T, B, cp=n, scheme=scheme,
+                      quantise=p.quantise_tiles,
+                      comm_lands_in_hbm=p.comm_lands_in_hbm)
     eff = efficiency(p, T / n)
     eff1 = efficiency(p, float(T))
+    ew_scale = p.fixpipe_hops / 3.0
+
+    def ew_and_land(w):
+        return p.recompute * (
+            w.bytes_ew * ew_scale / (hw.hbm_bw * p.bw_util)
+            + w.kv_hbm / (hw.hbm_bw * p.bw_util)
+        )
+
     best = (-1.0, 0.0, 0.0)
     for w in works:
-        t_attn = p.recompute * (
-            w.flops_attn / (hw.peak_flops * eff)
-            + w.bytes_ew / (hw.hbm_bw * p.bw_util)
-        )
+        t_attn = p.recompute * w.flops_attn / (hw.peak_flops * eff) + ew_and_land(w)
         if shard_dense:
             dense_flops = w.flops_dense
             e = eff

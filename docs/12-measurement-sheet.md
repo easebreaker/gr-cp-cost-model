@@ -45,6 +45,7 @@
 | M2.3 | 不可切部分 | `t_fixed` | ms | measured | dense 主干换 no-op，只留 embedding+all2all+optimizer<br>第二条独立口径；两条路同量级才可信 |  |  |  |  |  |  |
 | M3.1 | 实测 HBM 带宽 | `BW_hbm` | GB/s | measured | 64/256 MB 纯 copy |  |  |  |  |  |  |
 | M3.1 | HBM 效率 | `bw_util` |  | derived | BW_hbm / BW_nom<br>pin 住，不要拟合 | 0.5-0.8 | BW_hbm |  |  |  |  |
+| M3.3 | 分数矩阵的访存遍数 | `hops` | pass | measured | 把 L² 分数矩阵单独写出再读回，按 HBM 带宽反算遍数<br>DAV_2201 无 L0C→UB，至少要写一次读一次；A5 才有直通 | 2–4 |  |  |  |  |  |
 | M3.2 | 实测峰值算力 | `F_real` | TFLOPS | measured | 大 matmul，工作 dtype<br>eff_inf 的物理上限 |  |  |  |  |  |  |
 | M2.4 | 单卡查表时间 | `t_emb` | ms | measured | 只跑 embedding 查表，cp=1<br>按 cp 切分时乘 1/cp；但要注意随之而来的 re-gather |  |  |  |  |  |  |
 | M2.4 | id 去重比 | `dedup` |  | measured | 不同 id 数 / 总 token 数（真实流量）<br>按 token 数建模会高估 1/dedup 倍 | 0.1-0.5 |  |  |  |  |  |
@@ -67,6 +68,7 @@
 | S1.1 | 对应中位数时间 | `t_med` | ms | measured | 固定协议：warmup5 / 中位数15 / 前后 synchronize / 不 flush |  |  |  |  |  |  |
 | S1.1 | 对应 CV | `cv` | % | measured | 同上 | < 5% |  |  |  |  |  |
 | S1.1 | 提取出的效率 | `eff` |  | derived | eff = flops / (P·((t−t_fixed)/recomp − bytes/(BW·bw_util)))<br>代数解出，不是联合拟合 |  | t_med,t_fixed,bw_util,layers |  |  |  |  |
+| S1.3 | tile 对齐代价 | `align_meas` |  | measured | 同 kernel 在 cp=3/5/6 与 cp=4/8 的对比<br>若实测与 1/u(c) 不符，说明 eff 已含该效应，勿重复计算（G8） | = 1/u(c) | t_med |  |  |  |  |
 | S1.2 | 整栈扫描时间（交叉验算） | `t_med_full` | ms | measured | sweep.py --layers {model_layers}<br>与 S1.1 × 层数 应当吻合 |  |  |  |  |  |  |
 | S2.1 | 每 rank 计算不均衡<br>*每* `scheme=block\|scheme=balanced\|scheme=striped` | `imbal_time` |  | measured | 只跑某 rank 的 query 行，key 保留全长<br>每个 scheme 再按 cp=2,4,8 各一行 |  |  | scheme=block\|scheme=balanced\|scheme=striped |  |  |  |
 | S2.1 | 闭式预测的不均衡 | `imbal_pred` |  | derived | 2 − 1/cp（纯因果、连续分块）<br>实测不得超过此上界，超过说明掩码假设错 |  | imbal_time |  |  |  |  |

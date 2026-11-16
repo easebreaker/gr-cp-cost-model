@@ -124,6 +124,9 @@ def registry(T_ref: int = 4096, B: int = 32, L: Sequence[int] = (512, 1024, 2048
     a(Row("L0", "M3.1", "HBM 效率", "bw_util", "", "derived",
           "BW_hbm / BW_nom", "0.5-0.8", requires="BW_hbm",
           note="pin 住，不要拟合"))
+    a(Row("L0", "M3.3", "分数矩阵的访存遍数", "hops", "pass", "measured",
+          "把 L² 分数矩阵单独写出再读回，按 HBM 带宽反算遍数", "2–4",
+          note="DAV_2201 无 L0C→UB，至少要写一次读一次；A5 才有直通"))
     a(Row("L0", "M3.2", "实测峰值算力", "F_real", "TFLOPS", "measured",
           "大 matmul，工作 dtype", "", note="eff_inf 的物理上限"))
     a(Row("L0", "M2.4", "单卡查表时间", "t_emb", "ms", "measured",
@@ -180,6 +183,10 @@ def registry(T_ref: int = 4096, B: int = 32, L: Sequence[int] = (512, 1024, 2048
           "eff = flops / (P·((t−t_fixed)/recomp − bytes/(BW·bw_util)))", "",
           requires="t_med,t_fixed,bw_util,layers",
           note="代数解出，不是联合拟合"))
+    a(Row("L1", "S1.3", "tile 对齐代价", "align_meas", "", "measured",
+          "同 kernel 在 cp=3/5/6 与 cp=4/8 的对比", "= 1/u(c)",
+          requires="t_med",
+          note="若实测与 1/u(c) 不符，说明 eff 已含该效应，勿重复计算（G8）"))
     a(Row("L1", "S1.2", "整栈扫描时间（交叉验算）", "t_med_full", "ms", "measured",
           "sweep.py --layers {model_layers}", "",
           note="与 S1.1 × 层数 应当吻合"))

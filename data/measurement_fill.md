@@ -49,6 +49,7 @@ PYTHONPATH=src python scripts/read_fill.py data/measurement_fill.md
 - `M2.2` 单次启动成本（独立口径）
 - `M2.3` 不可切部分 t_fixed（独立口径）
 - `M3.1` HBM 带宽与效率
+- `M3.3` M3.3
 - `M3.2` 可达算力（eff_inf 的物理上限）
 - `M2.4` M2.4
 - `M4.1` 同步开销
@@ -58,6 +59,7 @@ PYTHONPATH=src python scripts/read_fill.py data/measurement_fill.md
 **L1 · 曲线与不均衡（不需要 CP）**
 - `decl` 口径声明（层数）
 - `S1.1` 效率曲线 eff(c) —— 唯一要拟合的东西
+- `S1.3` S1.3
 - `S1.2` 整栈交叉验算
 - `S2.1` 负载不均衡（只跑一个 rank 的 query）
 - `S3.1` 掩码拓扑：矩形 vs 三角
@@ -150,6 +152,12 @@ PYTHONPATH=src python scripts/read_fill.py data/measurement_fill.md
 | 实测 HBM 带宽 *(`BW_hbm`)* _GB/s_ |  | 64/256 MB 纯 copy |  |  |  |
 | HBM 效率 *(`bw_util`)* |  | BW_hbm / BW_nom | BW_hbm |  |  |
 
+## M3.3 · M3.3
+
+| 指标 | 变体 | 怎么测 | 依赖 | 值 | CV% |
+|:--|:--|:--|:--|:--|:--|
+| 分数矩阵的访存遍数 *(`hops`)* _pass_ |  | 把 L² 分数矩阵单独写出再读回，按 HBM 带宽反算遍数 |  |  |  |
+
 ## M3.2 · 可达算力（eff_inf 的物理上限）
 
 | 指标 | 变体 | 怎么测 | 依赖 | 值 | CV% |
@@ -210,6 +218,12 @@ PYTHONPATH=src python scripts/read_fill.py data/measurement_fill.md
 | 对应中位数时间 *(`t_med`)* _ms_ |  | 固定协议：warmup5 / 中位数15 / 前后 synchronize / 不 flush |  |  |  |
 | 对应 CV *(`cv`)* _%_ |  | 同上 |  |  |  |
 | 提取出的效率 *(`eff`)* |  | eff = flops / (P·((t−t_fixed)/recomp − bytes/(BW·bw_util))) | t_med,t_fixed,bw_util,layers |  |  |
+
+## S1.3 · S1.3
+
+| 指标 | 变体 | 怎么测 | 依赖 | 值 | CV% |
+|:--|:--|:--|:--|:--|:--|
+| tile 对齐代价 *(`align_meas`)* |  | 同 kernel 在 cp=3/5/6 与 cp=4/8 的对比 | t_med |  |  |
 
 ## S1.2 · 整栈交叉验算
 
